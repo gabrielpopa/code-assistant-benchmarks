@@ -44,17 +44,16 @@ Every project includes:
 - A starting codebase  
 - Tests to validate correctness  
 - Expected outputs  
-- Optional *detailed* instruction versions for comparison  
 
-### 🔹 2. Open the project in your editor  
+### 🔹 2. Open the project in your editor of choice
 Open the directory in VS Code, JetBrains, or your preferred environment.
 
 ### 🔹 3. Paste the instructions into the coding assistant  
 Choose which model you want to evaluate:
 
-- GitHub Copilot (GPT-4.1 / Claude / Qwen / Phi depending on tier)  
+- GitHub Copilot with online models
 - Copilot using local Ollama models  
-- ChatGPT VS Code extension  
+- ChatGPT-Codex Visual Studio Code extension  
 - Continue.dev with local LLMs  
 - Codeium  
 - Tabnine  
@@ -62,9 +61,3 @@ Choose which model you want to evaluate:
 - Your own fine-tuned LLM  
 
 Paste the contents of **`instructions.md`** and let the assistant attempt the task.
-
-### 🔹 4. Run the tests  
-Each benchmark includes a test runner, such as:
-
-```bash
-python -m tests.run_tests
