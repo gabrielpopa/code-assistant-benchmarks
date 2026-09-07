@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
+import inspect
 import os
 import subprocess
 import sys
@@ -233,6 +235,19 @@ def _(context: Context) -> None:
     require(not missing, f"missing states: {', '.join(missing)}")
 
 
+@check("state labels match their declared state names")
+def _(context: Context) -> None:
+    mappings = assigned_string_constants(context.tree)
+    expected = ("title", "help", "ready", "playing", "paused", "gameover")
+    mismatches = []
+    for name in expected:
+        if name not in mappings:
+            continue
+        if compact(mappings[name]) != compact(name):
+            mismatches.append(f"{name.upper()}={mappings[name]!r}")
+    require(not mismatches, f"state/debug labels are misleading: {', '.join(mismatches)}")
+
+
 @check("structured game components")
 def _(context: Context) -> None:
     class_names = [node.name.lower() for node in context.tree.body if isinstance(node, ast.ClassDef)]
@@ -387,6 +402,16 @@ def _(context: Context) -> None:
     )
 
 
+@check("obstacles continue spawning without long empty stretches")
+def _(context: Context) -> None:
+    maximum_lead, allowed_lead, spawned = simulate_obstacle_continuity(context)
+    require(spawned, "obstacle simulation did not produce any new obstacles")
+    require(
+        maximum_lead <= allowed_lead,
+        f"next obstacle drifted {maximum_lead:.0f}px ahead; expected at most {allowed_lead:.0f}px",
+    )
+
+
 @check("collision with obstacles, ceiling, and ground")
 def _(context: Context) -> None:
     require(
@@ -406,7 +431,6 @@ def _(context: Context) -> None:
         node
         for node in ast.walk(context.tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and any(word in node.name.lower() for word in ("collid", "collision", "bounds"))
     ]
     ceiling_branches = []
     for function in collision_functions:
@@ -444,6 +468,27 @@ def _(context: Context) -> None:
     require(not missing, f"pause action text is missing: {', '.join(missing)}")
 
 
+@check("menu navigation does not apply a key movement twice")
+def _(context: Context) -> None:
+    duplicates = []
+    for class_node in (
+        node
+        for node in context.tree.body
+        if isinstance(node, ast.ClassDef) and any(word in node.name.lower() for word in ("menu", "button", "ui"))
+    ):
+        for function in (
+            node
+            for node in class_node.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and any(word in node.name.lower() for word in ("key", "move", "navigate"))
+        ):
+            for statements in statement_lists(function):
+                for first, second in zip(statements, statements[1:]):
+                    if ast.dump(first, include_attributes=False) == ast.dump(second, include_attributes=False):
+                        duplicates.append(f"{class_node.name}.{function.name}")
+    require(not duplicates, f"duplicate consecutive navigation update in: {', '.join(sorted(set(duplicates)))}")
+
+
 @check("paused state freezes gameplay")
 def _(context: Context) -> None:
     branches = state_branches(context.tree, "paused") + state_branches(context.tree, "pause")
@@ -465,7 +510,10 @@ def _(context: Context) -> None:
         node
         for node in ast.walk(context.tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and any(word in node.name.lower() for word in ("start_run", "new_run", "restart", "reset_game"))
+        and any(
+            word in node.name.lower()
+            for word in ("start_run", "new_run", "restart", "reset_game", "reset_run")
+        )
     ]
     complete_reset = False
     for function in candidates:
@@ -516,7 +564,7 @@ def _(context: Context) -> None:
 def _(context: Context) -> None:
     require(
         context.has_identifier_fragment(
-            "visual_effect", "effects_enabled", "effects_on", "fx_enabled", "fx_on", "visuals"
+            "visual_effect", "effects_enabled", "effects_on", "fx_enabled", "fx_on", "vfx", "visuals"
         ),
         "no stored visual-effects enabled/disabled state found",
     )
@@ -673,6 +721,37 @@ def assigned_numeric_constants(tree: ast.Module) -> dict[str, float | int]:
     return result
 
 
+def assigned_string_constants(tree: ast.Module) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if len(targets) != 1:
+            continue
+        target = targets[0]
+        if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant):
+            if isinstance(node.value.value, str):
+                result[target.id.lower()] = node.value.value
+        elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(node.value, (ast.Tuple, ast.List)):
+            for item, value in zip(target.elts, node.value.elts):
+                if (
+                    isinstance(item, ast.Name)
+                    and isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                ):
+                    result[item.id.lower()] = value.value
+    return result
+
+
+def statement_lists(node: ast.AST):
+    for child in ast.walk(node):
+        for field in ("body", "orelse", "finalbody"):
+            statements = getattr(child, field, None)
+            if isinstance(statements, list) and statements:
+                yield statements
+
+
 def dotted_call_name(call: ast.Call) -> str:
     return node_name(call.func).lower()
 
@@ -809,7 +888,136 @@ def animated_ground_is_apparent(tree: ast.Module) -> bool:
         }
         if has_arithmetic and mutated_self_fields:
             return True
+
+    for class_node in (node for node in tree.body if isinstance(node, ast.ClassDef)):
+        methods = {
+            node.name: node
+            for node in class_node.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        ground_drawers = [
+            function
+            for name, function in methods.items()
+            if "ground" in name.lower() or "floor" in name.lower()
+        ]
+        if not ground_drawers:
+            continue
+        animation_fields = {
+            node.attr
+            for function in ground_drawers
+            for node in ast.walk(function)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+        }
+        for function in methods.values():
+            for node in ast.walk(function):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                    continue
+                if not any(isinstance(item, (ast.BinOp, ast.AugAssign)) for item in ast.walk(node)):
+                    continue
+                for target in assignment_targets(node):
+                    if (
+                        isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "self"
+                        and target.attr in animation_fields
+                    ):
+                        return True
     return False
+
+
+def simulate_obstacle_continuity(context: Context) -> tuple[float, float, bool]:
+    """Run a common obstacle-manager component without starting the game loop."""
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+    os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+    module_name = f"flippyblock_continuity_{os.getpid()}_{time.time_ns()}"
+    spec = importlib.util.spec_from_file_location(module_name, context.module_path)
+    require(spec is not None and spec.loader is not None, "could not import candidate module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+        field_classes = [
+            value
+            for name, value in vars(module).items()
+            if inspect.isclass(value)
+            and any(word in name.lower() for word in ("obstaclefield", "pipefield", "obstacles"))
+            and callable(getattr(value, "update", None))
+        ]
+        require(field_classes, "no independently testable obstacle-field component found")
+        field_class = field_classes[0]
+        try:
+            field = field_class()
+        except TypeError as exc:
+            raise AssertionError(f"could not construct {field_class.__name__}: {exc}") from exc
+        reset = getattr(field, "reset", None)
+        if callable(reset):
+            reset()
+
+        list_attribute = obstacle_list_attribute(field)
+        if list_attribute is None:
+            call_obstacle_update(field, module)
+            list_attribute = obstacle_list_attribute(field)
+        require(list_attribute is not None, "could not locate the obstacle collection")
+
+        initial = list(getattr(field, list_attribute))
+        require(initial, "obstacle manager starts empty and does not spawn on its first update")
+        initial_x = sorted(float(item.x) for item in initial if hasattr(item, "x"))
+        require(initial_x, "obstacles do not expose horizontal positions")
+
+        width = float(getattr(module, "WIDTH", 800))
+        player_x = float(getattr(module, "PLAYER_X", width * 0.2))
+        initial_ahead = [x for x in initial_x if x >= player_x]
+        require(initial_ahead, "no initial obstacle appears ahead of the player")
+        initial_lead = min(initial_ahead) - player_x
+        spacings = [b - a for a, b in zip(initial_x, initial_x[1:]) if b > a]
+        configured_spacing = getattr(module, "OBSTACLE_SPACING", getattr(module, "PIPE_SPACING", width / 3))
+        spacing = min(spacings) if spacings else float(configured_spacing)
+        allowed_lead = max(width, initial_lead + spacing * 1.25)
+
+        initial_ids = {id(item) for item in initial}
+        spawned = False
+        maximum_lead = initial_lead
+        for _ in range(3600):
+            call_obstacle_update(field, module)
+            obstacles = list(getattr(field, list_attribute))
+            spawned = spawned or any(id(item) not in initial_ids for item in obstacles)
+            ahead = [float(item.x) - player_x for item in obstacles if hasattr(item, "x") and item.x >= player_x]
+            if not ahead:
+                return float("inf"), allowed_lead, spawned
+            maximum_lead = max(maximum_lead, min(ahead))
+        return maximum_lead, allowed_lead, spawned
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def obstacle_list_attribute(field: object) -> str | None:
+    preferred = ("obstacles", "pipes", "items")
+    for name in preferred:
+        value = getattr(field, name, None)
+        if isinstance(value, list) and (not value or all(hasattr(item, "x") for item in value)):
+            return name
+    for name, value in vars(field).items():
+        if isinstance(value, list) and (not value or all(hasattr(item, "x") for item in value)):
+            return name
+    return None
+
+
+def call_obstacle_update(field: object, module: object) -> None:
+    update = field.update
+    parameters = list(inspect.signature(update).parameters.values())
+    arguments = []
+    for parameter in parameters:
+        name = parameter.name.lower()
+        if "dt" in name or "delta" in name:
+            arguments.append(1 / 60)
+        elif "speed" in name:
+            arguments.append(float(getattr(module, "PIPE_SPEED", 220.0)))
+        elif parameter.default is inspect.Parameter.empty:
+            arguments.append(1 / 60)
+    update(*arguments)
 
 
 def load_context(task_directory: Path) -> Context:

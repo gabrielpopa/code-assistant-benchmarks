@@ -41,9 +41,15 @@ Each benchmark lives in its own directory (e.g., `python/todo_counter`, `python/
 Every project includes:
 
 - `instructions.md` — high-level or minimal instructions  
-- A starting codebase  
-- Tests to validate correctness  
-- Expected outputs  
+- A starting codebase when the task calls for one
+- In some older benchmarks, visible tests and expected outputs
+
+New hidden-test benchmarks keep their evaluator under `evaluators/`, outside the
+task directory. Give the coding model access only to the selected task directory;
+do not mount or copy the corresponding evaluator into its workspace. After the
+model finishes, the benchmark operator runs the evaluator manually against the
+completed task. This separation prevents the model from reading or tailoring its
+implementation to the correctness tests.
 
 ### 🔹 2. Open the project in your editor of choice
 Open the directory in VS Code, JetBrains, or your preferred environment.

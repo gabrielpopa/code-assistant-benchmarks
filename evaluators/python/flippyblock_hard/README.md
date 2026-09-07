@@ -23,6 +23,6 @@ observation and should not be inferred from source-text checks alone.
 Report both scores, for example:
 
 ```text
-Automated: 37/37
+Automated: 40/40
 Manual: 12/12
 ```
